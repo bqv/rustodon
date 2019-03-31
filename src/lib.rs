@@ -1,10 +1,12 @@
-#![feature(proc_macro_hygiene, decl_macro)]
+#![feature(proc_macro_hygiene, decl_macro, try_blocks)]
 #![recursion_limit = "128"]
 // Allow some clippy lints that would otherwise warn on various Rocket-generated code.
 // Unfortunately, this means we lose these lints on _our_ code, but it's a small price to pay
 // for less line noise running `cargo clippy`.
 #![allow(clippy::needless_pass_by_value, clippy::suspicious_else_formatting)]
 
+extern crate base64;
+extern crate reqwest;
 #[macro_use]
 extern crate rocket;
 #[macro_use]

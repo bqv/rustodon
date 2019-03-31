@@ -1,14 +1,14 @@
 use resopt::try_resopt;
 use rocket::Route;
 
-use crate::activitypub::{ActivityGuard, ActivityStreams, AsActivityPub};
+use crate::activitypub::{ActivityGuard, ActivityStreams, AsActivityPub, SignatureGuard};
 use crate::db;
 use crate::db::models::{Account, Status};
 use crate::error::Perhaps;
 use crate::util::StatusID;
 
 pub fn routes() -> Vec<Route> {
-    routes![ap_user_object, ap_status_object,]
+    routes![ap_user_object, ap_status_object, ap_inbox_post,]
 }
 
 /// Returns a user as an ActivityPub object.
@@ -39,4 +39,13 @@ pub fn ap_status_object(
     ));
 
     Ok(Some(status.as_activitypub(&db_conn)?))
+}
+
+#[post("/inbox")]
+pub fn ap_inbox_post(
+    _sg: SignatureGuard,
+    _ag: ActivityGuard,
+    db_conn: db::Connection,
+) -> Perhaps<()> {
+    Ok(Some(()))
 }

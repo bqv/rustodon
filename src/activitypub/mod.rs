@@ -3,6 +3,9 @@ use crate::db;
 use crate::db::models::{Account, Status};
 use crate::routes::ui::view_helpers::HasBio;
 use failure::Error;
+use openssl::pkey::{PKey, Public};
+use openssl::hash::MessageDigest;
+use openssl::sign::Verifier;
 use rocket::http::{self, Accept, ContentType, MediaType};
 use rocket::request::{self, FromRequest, Request};
 use rocket::response::{self, Content, Responder};
@@ -32,6 +35,120 @@ where
 
                 http::Status::InternalServerError
             })
+    }
+}
+
+#[derive(Debug)]
+pub enum SignatureError {
+    BadCount,
+    Invalid,
+    Missing,
+}
+
+pub struct HttpSignature {
+    key_id: String,
+    headers: String,
+    signature: Vec<u8>,
+}
+impl HttpSignature {
+    fn from_header(value: &str) -> Option<Self> {
+        let mut key_id = String::new();
+        let mut headers = String::new();
+        let mut signature = Vec::new();
+
+        for pair in value.split(",") {
+            let kvpair = pair.split("=").collect::<Vec<_>>();
+            if kvpair.len() != 2 {
+                return None;
+            };
+            match kvpair[0] {
+                "keyId" => {
+                    if key_id.is_empty() && !kvpair[1].is_empty() {
+                        key_id.push_str(kvpair[1].trim_matches('"'));
+                    } else {
+                        return None;
+                    }
+                },
+                "headers" => {
+                    if headers.is_empty() && !kvpair[1].is_empty() {
+                        headers.push_str(kvpair[1].trim_matches('"'));
+                    } else {
+                        return None;
+                    }
+                },
+                "signature" => {
+                    if let Ok(bytes) = base64::decode(kvpair[1].trim_matches('"')) {
+                        if signature.is_empty() && !bytes.is_empty() {
+                            signature.extend(bytes.iter());
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                },
+                &_ => {
+                    return None;
+                }
+            }
+        };
+
+        if key_id.is_empty() || headers.is_empty() || signature.is_empty() {
+            None
+        } else {
+            Some(Self {
+                key_id: key_id,
+                headers: headers,
+                signature: signature,
+            })
+        }
+    }
+
+    fn get_key(&self) -> Option<PKey<Public>> {
+        let mut resp = reqwest::get(&self.key_id).ok()?;
+        if resp.status().is_success() {
+            let json: Value = resp.json().ok()?;
+            let pem = json["publickey"]["publickeypem"].as_str()?;
+            PKey::public_key_from_pem(pem.as_bytes()).ok()
+        } else {
+            None
+        }
+    }
+}
+
+/// A Rocket guard which ensures a valid signature is present
+pub struct SignatureGuard();
+impl<'a, 'r> FromRequest<'a, 'r> for SignatureGuard {
+    type Error = SignatureError;
+
+    fn from_request(request: &'a Request<'r>) -> request::Outcome<SignatureGuard, SignatureError> {
+        use rocket::Outcome;
+
+        let sigs: Vec<_> = request.headers().get("signature").collect();
+        match sigs.len() {
+            0 => Outcome::Failure((http::Status::BadRequest, SignatureError::Missing)),
+            1 => {
+                if let Some(sg) = { try {
+                    let sig = HttpSignature::from_header(sigs[0])?;
+                    let key = sig.get_key()?;
+                    let mut verifier = Verifier::new(MessageDigest::sha256(), &key).ok()?;
+                    let source = sig.headers.split(" ").map(|name| (name, match name {
+                        "(request-target)" => vec!(format!("{} {}", request.method().as_str().to_lowercase(), request.uri().path())),
+                        header => request.headers().get(header).map(|s| s.to_string()).collect()
+                    })).collect::<Vec<_>>();
+                    let _guard = Some(()).filter(|_|  !source.iter().any(|(_,v)| v.is_empty()))?;
+                    let verificand = source.iter().flat_map(|(k,vs)| vs.iter().map(move |v| format!("{}: {}", k, v))).collect::<Vec<_>>().join("\n");
+                    verifier.update(verificand.as_bytes()).ok()?;
+                    verifier.verify(&sig.signature).ok()?;
+                    SignatureGuard()
+                }} {
+                    Outcome::Success(sg)
+                } else {
+                    Outcome::Failure((http::Status::BadRequest, SignatureError::Invalid))
+                }
+            },
+            _ => Outcome::Failure((http::Status::BadRequest, SignatureError::BadCount)),
+        }
     }
 }
 
